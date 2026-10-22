@@ -52,14 +52,15 @@ jobs:
 
           rapid7-automox-sync \
             --secret-source env \
-            --region ca \
             --page-size 250 \
             --output "$(Build.ArtifactStagingDirectory)/rapid7-findings.csv" \
             --upload \
             --verbose
         displayName: Run sync job
         env:
-          RAPID7_API_KEY: $(Rapid7-Secret)
+          RAPID7_CONSOLE_URL: $(Rapid7-Console-URL)
+          RAPID7_CONSOLE_USERNAME: $(Rapid7-Console-Username)
+          RAPID7_CONSOLE_PASSWORD: $(Rapid7-Console-Password)
           AUTOMOX_API_KEY: $(Automox-Secret)
           AUTOMOX_ORG_ID: $(Automox-Org-ID)
 

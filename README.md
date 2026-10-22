@@ -4,13 +4,15 @@ This tool exports active Critical and Severe InsightVM findings, joins Rapid7
 vulnerability IDs to remediation details, writes an Automox-compatible Rapid7
 CSV, and can upload it to Automox Vulnerability Sync.
 
-It uses the InsightVM Cloud Integrations API v4. The CSV always remains on disk
+All Rapid7 requests use Security Console API v3 at
+`https://<host>:<port>/api/3` with HTTP Basic authentication. The CSV always remains on disk
 for auditability. Uploading to Automox is opt-in.
 
 ## Requirements
 
 - Python 3.10+
-- Rapid7 InsightVM API key
+- Rapid7 Security Console HTTPS URL, username and password
+- Network access from the runner to the Security Console
 - Automox API key and numeric organization ID when using `--upload`
 - Automox Vulnerability Sync enabled
 
@@ -69,7 +71,9 @@ rapid7-automox-sync --output rapid7-findings.csv --upload
 By default, secrets are read from environment variables:
 
 ```bash
-export RAPID7_API_KEY="..."
+export RAPID7_CONSOLE_URL="https://your-console:3780"
+export RAPID7_CONSOLE_USERNAME="your-api-user"
+export RAPID7_CONSOLE_PASSWORD="..."
 export AUTOMOX_API_KEY="..."
 export AUTOMOX_ORG_ID="123456"
 ```
@@ -83,7 +87,8 @@ python -m pip install -e ".[azure]"
 Create Key Vault secrets, for example:
 
 ```text
-rapid7-api-key
+rapid7-console-username
+rapid7-console-password
 automox-api-key
 automox-org-id
 ```
@@ -118,7 +123,8 @@ If your secret names differ, pass explicit names:
 rapid7-automox-sync \
   --secret-source azure-keyvault \
   --azure-key-vault-url https://your-vault-name.vault.azure.net/ \
-  --rapid7-api-key-secret prod-rapid7-api-key \
+  --rapid7-console-username-secret prod-console-username \
+  --rapid7-console-password-secret prod-console-password \
   --automox-api-key-secret prod-automox-api-key \
   --automox-org-id-secret prod-automox-org-id \
   --upload
@@ -127,7 +133,7 @@ rapid7-automox-sync \
 Useful options:
 
 ```text
---region ca            Rapid7 region: us, us2, us3, eu, ca, au, ap, aps2, me1
+--asset-group workstations/laptops  Exact console asset group name
 --page-size 500        Rapid7 API page size
 --hostname-fallback ip Use an asset IP when Rapid7 has no hostname
 --verbose              Enable debug logging
@@ -148,7 +154,7 @@ Microsoft-related patches are excluded from the generated CSV.
 ## Scheduling
 
 Run after InsightVM scans using a scheduler such as cron, a Kubernetes CronJob,
-or a CI system. Store API keys in the scheduler's secret store. Start without
+or a CI system. Store credentials in the scheduler's secret store. Start without
 `--upload`, inspect the CSV and skipped counts, then enable upload.
 
 ## Security Notes
@@ -160,8 +166,8 @@ The implementation still includes controls for the applicable risks:
 - API traffic is restricted to HTTPS and expected Rapid7/Automox hostnames.
 - TLS certificate validation is performed by Python's default trust store with
   TLS 1.2 or newer.
-- API keys are read from environment variables and are not logged.
-- API keys can also be retrieved from Azure Key Vault at runtime and are not
+- Credentials are read from environment variables and are not logged.
+- Credentials can also be retrieved from Azure Key Vault at runtime and are not
   written to disk by the application.
 - Generated CSV files are written with `0600` permissions.
 - CSV cells are escaped to reduce spreadsheet formula-injection risk.
@@ -181,3 +187,44 @@ your retention policy.
 cd "patch automation"
 python -m pytest
 ```
+
+## Security Console solutions
+
+Solution lookup requires network access to your Security Console and these settings:
+
+```bash
+export RAPID7_CONSOLE_URL="https://your-console:3780"
+export RAPID7_CONSOLE_USERNAME="your-api-user"
+export RAPID7_CONSOLE_PASSWORD="..."
+```
+
+For Azure Key Vault, use `rapid7-console-username` and `rapid7-console-password`,
+or override with `--rapid7-console-username-secret` and
+`--rapid7-console-password-secret`. Set the URL with `--console-url` or the
+environment variable above. No Rapid7 cloud API key or region is used.
+
+The exporter resolves `GET /api/3/vulnerabilities/{id}/solutions`, then fetches
+`GET /api/3/solutions/{id}` and maps `summary.text` to Solution and `steps.text`
+to Fix details. Lookups are cached for each run. Multiple solutions produce
+separate CSV groups; no solutions produce no row. API failures abort the export.
+These are all candidate solutions across platforms, not asset-specific best fixes.
+See the [Rapid7 API documentation](https://help.rapid7.com/insightvm/en-us/api/index.html).
+
+In Azure Pipelines, configure the corresponding console URL, username and password
+variables/secrets. The build agent must be able to reach the console.
+
+### Console v3 finding selection
+
+The exporter uses `GET /api/3/vulnerabilities` for Critical/Severe metadata,
+excluding the Microsoft Patch category. It resolves the exact asset group name
+through `GET /api/3/asset_groups` and its `/assets` membership endpoint, then
+intersects those IDs with `POST /api/3/assets/search` using `last-scan-date`
+`is-within-the-last: 7`. A missing or ambiguous group fails the run.
+`GET /api/3/assets/{id}/vulnerabilities` supplies current findings; only
+`status: vulnerable` is exported. Exceptions (`invulnerable`) and `no-results`
+are excluded. Paged endpoints read `resources` and `page.totalPages`.
+
+Migration: remove `--region`, `--rapid7-api-key-secret`, and `RAPID7_API_KEY`.
+Configure the console URL and credentials above. Azure pipeline variable names
+are `Rapid7-Console-URL`, `Rapid7-Console-Username`, and `Rapid7-Console-Password`.
+The runner must have console network access and trust its TLS certificate.

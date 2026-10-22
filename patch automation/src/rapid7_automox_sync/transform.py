@@ -2,7 +2,7 @@ import csv
 import os
 import re
 import tempfile
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from pathlib import Path
 from typing import Any
 
@@ -37,6 +37,7 @@ def transform_assets(
     assets: Iterable[dict[str, Any]],
     catalog: dict[str, tuple[str, str, str, str]],
     hostname_fallback: str = "skip",
+    solution_lookup: Callable[[str], list[dict[str, Any]]] | None = None,
 ) -> tuple[list[AutomoxFinding], TransformStats]:
     findings: dict[tuple[str, str], dict[str, Any]] = {}
     assets_seen = 0
@@ -62,12 +63,20 @@ def transform_assets(
                 severity, software, solution, fix_details = catalog_entry
                 if _is_microsoft_software(software):
                     continue
-                key = (solution, fix_details)
-                group = findings.setdefault(
-                    key,
-                    {"solution": solution, "fix_details": fix_details, "hosts": set()},
-                )
-                group["hosts"].add(host)
+                remediations = [(solution, fix_details)]
+                if solution_lookup is not None:
+                    remediations = [
+                        (_clean_cell(_rapid7_text(record.get("summary"))),
+                         _clean_cell(_rapid7_text(record.get("steps"))))
+                        for record in solution_lookup(vulnerability_id)
+                    ]
+                for solution, fix_details in remediations:
+                    key = (solution, fix_details)
+                    group = findings.setdefault(
+                        key,
+                        {"solution": solution, "fix_details": fix_details, "hosts": set()},
+                    )
+                    group["hosts"].add(host)
 
     ordered = [
         AutomoxFinding(
@@ -129,6 +138,8 @@ def _rapid7_text(value: Any) -> str:
     if isinstance(value, (list, tuple)):
         return "; ".join(str(item) for item in value)
     if isinstance(value, dict):
+        if "text" in value:
+            return str(value["text"] or "")
         return "; ".join(f"{key}: {item}" for key, item in value.items())
     return str(value)
 
