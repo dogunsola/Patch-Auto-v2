@@ -5,7 +5,7 @@ import stat
 from pathlib import Path
 
 from .automox import AutomoxClient
-from .rapid7 import Rapid7Client, VALID_REGIONS
+from .rapid7 import Rapid7Client
 from .secrets import AzureKeyVaultSecretProvider, EnvSecretProvider, default_secret_name
 from .transform import build_catalog, transform_assets, write_automox_csv
 
@@ -39,12 +39,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Export critical and severe InsightVM findings to Automox."
     )
-    parser.add_argument(
-        "--region",
-        choices=sorted(VALID_REGIONS),
-        default=os.environ.get("RAPID7_REGION", "us"),
-        help="Rapid7 Insight Platform region (default: RAPID7_REGION or us)",
-    )
+    parser.add_argument("--asset-group", default="workstations/laptops",
+                        help="Exact Security Console asset group name")
     parser.add_argument("--page-size", type=positive_int, default=500)
     parser.add_argument(
         "--output",
@@ -67,17 +63,12 @@ def parse_args() -> argparse.Namespace:
         "--secret-source",
         choices=("env", "azure-keyvault"),
         default=os.environ.get("SECRET_SOURCE", "env"),
-        help="Secret source for API keys (default: SECRET_SOURCE or env)",
+        help="Secret source for credentials (default: SECRET_SOURCE or env)",
     )
     parser.add_argument(
         "--azure-key-vault-url",
         default=os.environ.get("AZURE_KEY_VAULT_URL", ""),
         help="Azure Key Vault URL when --secret-source azure-keyvault is used",
-    )
-    parser.add_argument(
-        "--rapid7-api-key-secret",
-        default=None,
-        help="Secret name for the Rapid7 API key",
     )
     parser.add_argument(
         "--automox-api-key-secret",
@@ -89,6 +80,10 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Secret name for the Automox organization ID",
     )
+    parser.add_argument("--console-url", default=os.environ.get("RAPID7_CONSOLE_URL", ""),
+                        help="Security Console HTTPS origin, e.g. https://console:3780")
+    parser.add_argument("--rapid7-console-username-secret", default=None)
+    parser.add_argument("--rapid7-console-password-secret", default=None)
     parser.add_argument("--verbose", action="store_true")
     return parser.parse_args()
 
@@ -110,9 +105,6 @@ def main() -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
     )
     secrets = build_secret_provider(args)
-    rapid7_api_key_secret = args.rapid7_api_key_secret or default_secret_name(
-        args.secret_source, "RAPID7_API_KEY", "rapid7-api-key"
-    )
     automox_api_key_secret = args.automox_api_key_secret or default_secret_name(
         args.secret_source, "AUTOMOX_API_KEY", "automox-api-key"
     )
@@ -120,10 +112,16 @@ def main() -> None:
         args.secret_source, "AUTOMOX_ORG_ID", "automox-org-id"
     )
 
+    if not args.console_url:
+        raise SystemExit("--console-url or RAPID7_CONSOLE_URL is required for Rapid7 API access")
     rapid7 = Rapid7Client(
-        api_key=secrets.get_required(rapid7_api_key_secret),
-        region=args.region,
+        args.console_url,
+        secrets.get_required(args.rapid7_console_username_secret or default_secret_name(
+            args.secret_source, "RAPID7_CONSOLE_USERNAME", "rapid7-console-username")),
+        secrets.get_required(args.rapid7_console_password_secret or default_secret_name(
+            args.secret_source, "RAPID7_CONSOLE_PASSWORD", "rapid7-console-password")),
         page_size=args.page_size,
+        asset_group=args.asset_group,
     )
     LOG.info("Downloading Rapid7 Critical and Severe vulnerability catalog")
     catalog = build_catalog(rapid7.iter_vulnerability_catalog())
@@ -134,6 +132,7 @@ def main() -> None:
         rapid7.iter_affected_assets(),
         catalog,
         hostname_fallback=args.hostname_fallback,
+        solution_lookup=rapid7.get_vulnerability_solutions,
     )
     args.output = safe_output_path(args.output)
     write_automox_csv(args.output, findings)

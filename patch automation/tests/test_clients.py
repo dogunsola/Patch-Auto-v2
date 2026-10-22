@@ -8,40 +8,67 @@ from rapid7_automox_sync.http import ApiError, HttpClient
 from rapid7_automox_sync.rapid7 import Rapid7Client
 
 class ClientTests(unittest.TestCase):
-    def test_rapid7_cursor_pagination_and_include_same(self) -> None:
+    def test_console_assets_pagination_membership_and_active_findings(self) -> None:
+        def page(resources, total=1):
+            return {"resources": resources, "page": {"totalPages": total}}
         http = Mock()
         http.request_json.side_effect = [
-            {
-                "data": [{"id": "asset-1"}],
-                "metadata": {"totalPages": 2, "cursor": "next-cursor"},
-            },
-            {
-                "data": [{"id": "asset-2"}],
-                "metadata": {"totalPages": 2, "cursor": "done"},
-            },
+            page([{"id": 1, "name": "other workstations/laptops"}], 2),
+            page([{"id": 2, "name": "workstations/laptops"}], 2),
+            {"resources": [10, 20]},
+            page([{"id": 99}, {"id": 10, "hostName": "host-a", "ip": "10.0.0.1"}], 2),
+            page([{"id": "v1", "status": "vulnerable"}], 2),
+            page([{"id": "v2", "status": "invulnerable"},
+                  {"id": "v3", "status": "no-results"}], 2),
+            page([{"id": 20, "ip": "10.0.0.2"}], 2),
+            page([{"id": "v4", "status": "vulnerable"}]),
         ]
-        client = Rapid7Client("key", "ca", page_size=100, http=http)
+        client = Rapid7Client("https://console.example:3780", "user", "password",
+                              http=http, page_size=100)
+        self.assertEqual(list(client.iter_affected_assets()), [
+            {"id": 10, "host_name": "host-a", "ip": "10.0.0.1", "new": [{"vulnerability_id": "v1"}]},
+            {"id": 20, "host_name": "", "ip": "10.0.0.2", "new": [{"vulnerability_id": "v4"}]},
+        ])
+        calls = http.request_json.call_args_list
+        self.assertTrue(all(c.args[1].startswith("https://console.example:3780/api/3/") for c in calls))
+        self.assertEqual(calls[1].kwargs['params']['page'], 1)
+        self.assertEqual(calls[2].args[1], 'https://console.example:3780/api/3/asset_groups/2/assets')
+        self.assertEqual(calls[3].args[0], 'POST')
+        self.assertEqual(calls[3].kwargs['json_body'], {'match': 'all', 'filters': [
+            {'field': 'last-scan-date', 'operator': 'is-within-the-last', 'value': 7}]})
+        self.assertEqual(calls[5].kwargs['params']['page'], 1)
+        self.assertEqual(calls[6].kwargs['params']['page'], 1)
 
-        self.assertEqual(
-            list(client.iter_affected_assets()),
-            [{"id": "asset-1"}, {"id": "asset-2"}],
-        )
-        first_params = http.request_json.call_args_list[0].kwargs["params"]
-        second_params = http.request_json.call_args_list[1].kwargs["params"]
-        first_body = http.request_json.call_args_list[0].kwargs["json_body"]
-        self.assertEqual(first_params["includeSame"], "true")
-        self.assertNotIn("cursor", first_params)
-        self.assertEqual(second_params["cursor"], "next-cursor")
-        asset_filter = first_body["asset"]
-        self.assertEqual(
-            asset_filter,
-            "asset.lastScanTime > /NOW - P7D/ && asset.groups IN ['workstations/laptops']",
-        )
-        self.assertEqual(
-            first_body["vulnerability"],
-            "vulnerability.severity DOES NOT CONTAIN 'moderate' && "
-            "vulnerability.categories NOT IN ['microsoft patch']",
-        )
+    def test_console_catalog_filters_severity_and_category(self):
+        http = Mock()
+        http.request_json.side_effect = [
+            {'resources': [{'id': 'a', 'severity': 'Critical'},
+                           {'id': 'b', 'severity': 'Moderate'}], 'page': {'totalPages': 2}},
+            {'resources': [{'id': 'c', 'severity': 'Severe', 'categories': ['Microsoft Patch']},
+                           {'id': 'd', 'severity': 'Severe', 'categories': ['Apache']}],
+             'page': {'totalPages': 2}},
+        ]
+        client = Rapid7Client('https://console:3780', 'user', 'password', http=http)
+        self.assertEqual([v['id'] for v in client.iter_vulnerability_catalog()], ['a', 'd'])
+        self.assertEqual(http.request_json.call_args.args, ('GET', 'https://console:3780/api/3/vulnerabilities'))
+
+    def test_missing_group_fails_without_broadening_scope(self):
+        http = Mock()
+        http.request_json.return_value = {'resources': [], 'page': {'totalPages': 0}}
+        client = Rapid7Client('https://console:3780', 'user', 'password', http=http)
+        with self.assertRaisesRegex(ValueError, 'exactly one'):
+            list(client.iter_affected_assets())
+        self.assertEqual(http.request_json.call_count, 1)
+
+    def test_empty_group_has_no_assets(self):
+        http = Mock()
+        http.request_json.side_effect = [
+            {'resources': [{'id': 2, 'name': 'workstations/laptops'}], 'page': {'totalPages': 1}},
+            {'resources': []},
+        ]
+        client = Rapid7Client('https://console:3780', 'user', 'password', http=http)
+        self.assertEqual(list(client.iter_affected_assets()), [])
+        self.assertEqual(http.request_json.call_count, 2)
 
     def test_automox_upload_uses_rapid7_format(self) -> None:
         http = Mock()
